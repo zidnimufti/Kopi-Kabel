@@ -18,11 +18,13 @@ import {
   ModalBody,
   ModalFooter,
   useDisclosure,
+  Input
 } from "@heroui/react";
 import { Icon } from "@iconify/react";
 import { useCart, PaymentMethod } from "../components/CartContext";
 import { generateQrisBase64 } from "@/components/qris";
 import { Product } from "../types";
+import { OUTLETS } from "@/config/outlets";
 
 // Helper: ambil harga unit dari DB berdasarkan size
 function getUnitPriceFromDB(product: Product, size: "regular" | "large") {
@@ -39,14 +41,22 @@ function getUnitPriceFromDB(product: Product, size: "regular" | "large") {
 
 export const CartDropdown: React.FC = () => {
   const {
-    cartItems,
-    removeFromCart,
-    updateQuantity,
-    totalItems,
-    paymentMethod,
-    setPaymentMethod,
-    clearCart,
-  } = useCart();
+  cartItems,
+  removeFromCart,
+  updateQuantity,
+  totalItems,
+  paymentMethod,
+  setPaymentMethod,
+  clearCart,
+  outletId,
+  setOutletId,
+  tableNumber,
+  setTableNumber,
+  customerName,
+  setCustomerName,
+} = useCart();
+
+const outlet = OUTLETS.find((o) => o.id === outletId);
 
   // Hitung total dari cart berdasarkan harga DB + size
   const cartTotal = cartItems.reduce((sum, item) => {
@@ -346,6 +356,21 @@ export const CartDropdown: React.FC = () => {
                   : "Cash Payment"}
               </ModalHeader>
               <ModalBody>
+                <RadioGroup
+                  label="Lantai"
+                  orientation="horizontal"
+                  isRequired
+                  value={outletId ? String(outletId) : ""}
+                  onValueChange={(v) => setOutletId(Number(v))}
+                >
+                  {OUTLETS.map((o) => (
+                    <Radio key={o.id} value={String(o.id)}>
+                      {o.name}
+                    </Radio>
+                  ))}
+                </RadioGroup>
+                <Input label="Nama" isRequired value={customerName} onValueChange={setCustomerName} />
+                <Input label="Nomor meja (opsional)" value={tableNumber} onValueChange={setTableNumber} />
                 {paymentMethod === "qris" ? (
                   <div className="flex flex-col items-center">
                     <div className="border border-default-200 p-4 rounded-lg mb-4">
@@ -444,9 +469,11 @@ export const CartDropdown: React.FC = () => {
                 <Button
                   color="primary"
                   isDisabled={
-                    paymentMethod === "cash" &&
-                    (!selectedCashOption ||
-                      (selectedCashOption === "input_amount" && !inputAmount))
+                    !outletId ||
+                    !customerName.trim() ||
+                    (paymentMethod === "cash" &&
+                      (!selectedCashOption ||
+                        (selectedCashOption === "input_amount" && !inputAmount)))
                   }
                   onPress={() => {
                     // susun pesan WhatsApp
@@ -460,9 +487,18 @@ export const CartDropdown: React.FC = () => {
                       } = Rp.${(unit * item.quantity).toFixed(0)}`;
                     });
                     const totalLine = `Total: Rp.${cartTotal.toFixed(0)}`;
+                    if (!phoneNumber) return;
+                    const headerLines = [
+                      `Outlet: ${outlet?.name ?? "-"}`,
+                      `Nama: ${customerName.trim()}`,
+                      tableNumber ? `Meja: ${tableNumber}` : null,
+                      `Pembayaran: ${(paymentMethod ?? "").toUpperCase()}`,
+                      "",
+                    ].filter((l): l is string => l !== null);
+
 
                     if (paymentMethod === "qris") {
-                      const text = [...itemsLines, totalLine].join("\n");
+                      const text = [...headerLines, ...itemsLines, totalLine].join("\n");
                       const url = `https://api.whatsapp.com/send/?phone=${phoneNumber}&text=${encodeURIComponent(
                         text
                       )}`;
@@ -479,9 +515,7 @@ export const CartDropdown: React.FC = () => {
                         uangLine = `Jumlah Uang yang akan dibayarkan: Rp.50000`;
                       }
 
-                      const text = [...itemsLines, totalLine, uangLine].join(
-                        "\n"
-                      );
+                      const text = [...headerLines, ...itemsLines, totalLine, uangLine].join("\n");
                       const url = `https://api.whatsapp.com/send/?phone=${phoneNumber}&text=${encodeURIComponent(
                         text
                       )}`;

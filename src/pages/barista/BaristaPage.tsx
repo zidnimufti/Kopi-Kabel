@@ -14,6 +14,7 @@ import {
 import { useAuth } from "../../auth/hooks/useAuth";
 import { useProfile } from "../../auth/hooks/useProfile";
 import { supabase } from "../../api/supabaseClient";
+import OutletGate from "../../components/OutletGate";
 
 import {
   Button,
@@ -649,6 +650,15 @@ export default function BaristaPage() {
             Logged in as: {profile?.full_name || user?.email}
           </p>
         </div>
+        <div>
+  <h1 className="text-xl font-bold">Halaman Barista</h1>
+  <p className="text-sm text-default-500">
+    Logged in as: {profile?.full_name || user?.email}
+  </p>
+  <div className="mt-1">
+    <OutletGate />
+  </div>
+</div>
         <div className="flex items-center gap-2">
           <Button color="warning" onPress={() => setIsQueueOpen(true)}>
             Queue ({pendingOrders.length})
