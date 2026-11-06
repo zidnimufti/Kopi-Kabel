@@ -1,13 +1,14 @@
 // src/components/OutletGate.tsx
-// Letakkan di header/atas BaristaPage:  <OutletGate />
+// Letakkan di header BaristaPage:  <OutletGate />
 //
-// - Menampilkan lantai tempat barista bertugas hari ini + tombol "Pindah lantai".
-// - Bila absen hari ini belum punya lantai (mis. barista yang sudah absen sebelum
-//   fitur ini ada), muncul dialog yang WAJIB diisi sebelum bekerja.
-// - Setelah lantai berubah, halaman dimuat ulang supaya antrean order mengikuti
-//   lantai yang baru.
+// - Menampilkan lantai tempat barista bertugas + tombol "Pindah lantai".
+// - Bila absen terbaru belum punya lantai, muncul dialog yang WAJIB diisi.
+// - Bila shift pada absen terbaru sudah berakhir (dan barista belum absen pulang),
+//   muncul pengingat "Absen shift baru". Tidak ada pindah halaman otomatis,
+//   supaya keranjang yang sedang dibuat tidak hilang.
 
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Button,
   Chip,
@@ -19,15 +20,23 @@ import {
   useDisclosure,
 } from "@heroui/react";
 import { useAuth } from "../auth/hooks/useAuth";
-import { getTodayOutletId, setMyOutlet } from "../api/attandance";
+import {
+  getTodayAttendance,
+  isShiftValidNow,
+  setMyOutlet,
+} from "../api/attandance";
 import { OUTLETS } from "../config/outlets";
 
 export default function OutletGate() {
   const auth = useAuth() as any;
+  const navigate = useNavigate();
   const userId: string | undefined = auth?.user?.id;
 
   const [outletId, setOutletId] = useState<number | null>(null);
+  const [shift, setShift] = useState<string | null>(null);
+  const [clockedOut, setClockedOut] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [expired, setExpired] = useState(false);
   const [picked, setPicked] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -36,13 +45,16 @@ export default function OutletGate() {
   const load = useCallback(async () => {
     if (!userId) return;
     try {
-      const id = await getTodayOutletId(userId);
+      const row = await getTodayAttendance(userId);
+      const id = (row?.outlet_id as number | null | undefined) ?? null;
       setOutletId(id);
       setPicked(id);
+      setShift(row?.shift ?? null);
+      setClockedOut(!!row?.clock_out);
       setLoaded(true);
-      if (id === null) onOpen(); // wajib memilih
+      if (id === null) onOpen(); // wajib memilih lantai
     } catch (e: any) {
-      setError(e?.message ?? "Gagal memuat lantai bertugas.");
+      setError(e?.message ?? "Gagal memuat data absen.");
       setLoaded(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -51,6 +63,14 @@ export default function OutletGate() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Cek tiap menit apakah shift pada absen terbaru sudah berakhir
+  useEffect(() => {
+    const check = () => setExpired(!!shift && !clockedOut && !isShiftValidNow(shift));
+    check();
+    const t = setInterval(check, 60_000);
+    return () => clearInterval(t);
+  }, [shift, clockedOut]);
 
   const save = async () => {
     if (!picked) return;
@@ -73,13 +93,29 @@ export default function OutletGate() {
 
   return (
     <>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Chip color={current ? "primary" : "warning"} size="sm" variant="flat">
           {current ? current.name : "Lantai belum dipilih"}
         </Chip>
         <Button size="sm" variant="light" onPress={onOpen}>
           Pindah lantai
         </Button>
+
+        {expired && (
+          <>
+            <Chip color="warning" size="sm" variant="flat">
+              {shift} sudah berakhir
+            </Chip>
+            <Button
+              size="sm"
+              color="warning"
+              variant="flat"
+              onPress={() => navigate("/app/verify-attendance")}
+            >
+              Absen shift baru
+            </Button>
+          </>
+        )}
       </div>
 
       <Modal

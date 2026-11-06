@@ -68,8 +68,12 @@ interface OrderCartProps {
   isSubmitting: boolean;
   onCustomerNameChange: (name: string) => void;
   onPaymentMethodChange: (pm: PaymentMethod) => void;
-  onUpdateQuantity: (productId: number, newQuantity: number) => void;
-  onRemoveItem: (productId: number) => void;
+    onUpdateQuantity: (
+    productId: number,
+    size: "regular" | "large",
+    newQuantity: number
+  ) => void;
+  onRemoveItem: (productId: number, size: "regular" | "large") => void;
   onSubmit: () => void;
   onClose?: () => void;
   showClose?: boolean;
@@ -161,7 +165,7 @@ const OrderCart = ({
           ) : (
             <ul className="divide-y divide-default-200">
               {cart.map((item) => (
-                <li key={item.id} className="py-3">
+                <li key={`${item.id}-${item.size ?? "regular"}`} className="py-3">
                   <div className="flex justify-between items-center gap-3">
                     <p className="font-medium break-words">{item.name} ({item.size === "large" ? "Large" : "Regular"})</p>
                     <p className="font-semibold">
@@ -181,7 +185,7 @@ const OrderCart = ({
                         size="sm"
                         variant="flat"
                         onPress={() =>
-                          onUpdateQuantity(item.id, item.quantity - 1)
+                          onUpdateQuantity(item.id, item.size ?? "regular", item.quantity - 1)
                         }
                       >
                         –
@@ -192,7 +196,7 @@ const OrderCart = ({
                         size="sm"
                         variant="flat"
                         onPress={() =>
-                          onUpdateQuantity(item.id, item.quantity + 1)
+                          onUpdateQuantity(item.id, item.size ?? "regular", item.quantity + 1)
                         }
                       >
                         +
@@ -202,7 +206,7 @@ const OrderCart = ({
                         size="sm"
                         color="danger"
                         variant="light"
-                        onPress={() => onRemoveItem(item.id)}
+                        onPress={() => onRemoveItem(item.id, item.size ?? "regular")}
                       >
                         <TrashIcon />
                       </Button>
@@ -504,7 +508,7 @@ export default function BaristaPage() {
   const handleEditStart = async (orderId: number) => {
     try {
       const detail = await getOrderWithItems(orderId);
-      const mapped: CartItem[] = (detail?.items ?? []).map((it: any) => {
+            const mapped: CartItem[] = (detail?.items ?? []).map((it: any) => {
         const p: Product =
           it.product ??
           products.find((pp) => pp.id === it.product_id) ?? {
@@ -514,13 +518,24 @@ export default function BaristaPage() {
             image_url: null,
             category_id: null as any,
           };
+
+        // Pertahankan ukuran yang tersimpan, dan hitung harga satuan
+        // dengan cara yang sama seperti saat item ditambahkan ke keranjang
+        // (harga sesuai ukuran, lalu diskon).
+        const size: "regular" | "large" = it.size === "large" ? "large" : "regular";
+        const base = size === "large" && p.price_large ? p.price_large : p.price;
+        const unitPrice = p.discount
+          ? Math.round(base - (base * p.discount) / 100)
+          : base;
+
         return {
           id: p.id,
           name: p.name,
-          price: p.price,
+          price: unitPrice,
           image_url: p.image_url,
           category_id: p.category_id,
           quantity: it.quantity ?? 1,
+          size,
         } as CartItem;
       });
       setCustomerName(detail?.customer_name ?? "");
@@ -603,13 +618,25 @@ export default function BaristaPage() {
     }
   };
 
-  const handleUpdateQuantity = (productId: number, newQuantity: number) => {
+    // Baris keranjang dikenali oleh (id produk + ukuran)
+  const isSameLine = (i: CartItem, id: number, size: "regular" | "large") =>
+    i.id === id && (i.size ?? "regular") === size;
+
+  const handleRemoveItem = (productId: number, size: "regular" | "large") => {
+    setCart((current) => current.filter((i) => !isSameLine(i, productId, size)));
+  };
+
+  const handleUpdateQuantity = (
+    productId: number,
+    size: "regular" | "large",
+    newQuantity: number
+  ) => {
     if (newQuantity <= 0) {
-      setCart((currentCart) => currentCart.filter((i) => i.id !== productId));
+      handleRemoveItem(productId, size);
     } else {
-      setCart((currentCart) =>
-        currentCart.map((i) =>
-          i.id === productId ? { ...i, quantity: newQuantity } : i
+      setCart((current) =>
+        current.map((i) =>
+          isSameLine(i, productId, size) ? { ...i, quantity: newQuantity } : i
         )
       );
     }
@@ -649,16 +676,10 @@ export default function BaristaPage() {
           <p className="text-sm text-default-500">
             Logged in as: {profile?.full_name || user?.email}
           </p>
+          <div className="mt-1">
+            <OutletGate />
+          </div>
         </div>
-        <div>
-  <h1 className="text-xl font-bold">Halaman Barista</h1>
-  <p className="text-sm text-default-500">
-    Logged in as: {profile?.full_name || user?.email}
-  </p>
-  <div className="mt-1">
-    <OutletGate />
-  </div>
-</div>
         <div className="flex items-center gap-2">
           <Button color="warning" onPress={() => setIsQueueOpen(true)}>
             Queue ({pendingOrders.length})
@@ -865,9 +886,7 @@ export default function BaristaPage() {
               onPaymentMethodChange={setPaymentMethod}
               onSubmit={handleSubmitOrder}
               onUpdateQuantity={handleUpdateQuantity}
-              onRemoveItem={(id) =>
-                setCart((c) => c.filter((i) => i.id !== id))
-              }
+              onRemoveItem={handleRemoveItem}
               isEditing={editingOrderId !== null}
               onCancelEdit={cancelEdit}
             />
@@ -924,9 +943,7 @@ export default function BaristaPage() {
                 onPaymentMethodChange={setPaymentMethod}
                 onSubmit={handleSubmitOrder}
                 onUpdateQuantity={handleUpdateQuantity}
-                onRemoveItem={(id) =>
-                  setCart((c) => c.filter((i) => i.id !== id))
-                }
+                onRemoveItem={handleRemoveItem}
                 onClose={() => setIsCartOpen(false)}
                 showClose
                 isEditing={editingOrderId !== null}

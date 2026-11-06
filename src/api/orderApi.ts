@@ -170,9 +170,53 @@ export const updateOrderAndItems = async (
   payload: {
     customer_name?: string;
     payment_method?: PaymentMethod;
-    items: { product_id: number; quantity: number; size: "regular" | "large" }[]; // ✅ add size
+    items: { product_id: number; quantity: number; size: "regular" | "large" }[];
   },
 ) => {
+  if (payload.items.length === 0) {
+    throw new Error('Order harus memiliki minimal 1 item.');
+  }
+
+  // 1) Siapkan semua perhitungan DULU (sebelum menghapus apa pun)
+  const productIds = [...new Set(payload.items.map((i) => i.product_id))];
+
+  const { data: prodRows, error: pErr } = await supabase
+    .from('products')
+    .select('id, price, price_large, discount')
+    .in('id', productIds);
+  if (pErr) throw pErr;
+
+  const priceMap = new Map<
+    number,
+    { price: number; price_large?: number | null; discount?: number | null }
+  >(
+    (prodRows ?? []).map((p: any) => [
+      p.id,
+      { price: p.price, price_large: p.price_large, discount: p.discount },
+    ])
+  );
+
+  const itemsToInsert = payload.items.map((x) => {
+    const prod = priceMap.get(x.product_id);
+    const base =
+      x.size === 'large' && prod?.price_large ? prod.price_large : prod?.price ?? 0;
+    // Rumus diskon sama dengan saat menambah ke keranjang (BaristaPage & CartDropdown)
+    const unitPrice = prod?.discount
+      ? Math.round(base - (base * prod.discount) / 100)
+      : base;
+
+    return {
+      order_id: orderId,
+      product_id: x.product_id,
+      quantity: x.quantity,
+      size: x.size,
+      subtotal: unitPrice * x.quantity,
+    };
+  });
+
+  const newTotal = itemsToInsert.reduce((s, it) => s + (it.subtotal || 0), 0);
+
+  // 2) Perbarui data order
   const { error: upErr } = await supabase
     .from('orders')
     .update({
@@ -182,41 +226,18 @@ export const updateOrderAndItems = async (
     .eq('id', orderId);
   if (upErr) throw upErr;
 
+  // 3) Ganti item
   const { error: delErr } = await supabase.from('order_items').delete().eq('order_id', orderId);
   if (delErr) throw delErr;
-
-  const productIds = [...new Set(payload.items.map((i) => i.product_id))];
-  const { data: prodRows, error: pErr } = await supabase
-    .from('products')
-    .select('id, price, price_large')
-    .in('id', productIds);
-  if (pErr) throw pErr;
-
-  const priceMap = new Map<number, { price: number; price_large?: number }>(
-    (prodRows ?? []).map((p: any) => [p.id, { price: p.price, price_large: p.price_large }])
-  );
-
-  const itemsToInsert = payload.items.map((x) => {
-    const productPrice = priceMap.get(x.product_id);
-    const unitPrice =
-      x.size === "large" && productPrice?.price_large
-        ? productPrice.price_large
-        : productPrice?.price ?? 0;
-
-    return {
-      order_id: orderId,
-      product_id: x.product_id,
-      quantity: x.quantity,
-      size: x.size, // ✅ save size
-      subtotal: unitPrice * x.quantity,
-    };
-  });
 
   const { error: insErr } = await supabase.from('order_items').insert(itemsToInsert);
   if (insErr) throw insErr;
 
-  const newTotal = itemsToInsert.reduce((s, it) => s + (it.subtotal || 0), 0);
-  const { error: totErr } = await supabase.from('orders').update({ total_amount: newTotal }).eq('id', orderId);
+  // 4) Perbarui total
+  const { error: totErr } = await supabase
+    .from('orders')
+    .update({ total_amount: newTotal })
+    .eq('id', orderId);
   if (totErr) throw totErr;
 
   return { id: orderId, total_amount: newTotal };
