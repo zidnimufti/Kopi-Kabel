@@ -1,15 +1,20 @@
 // --- FILE: src/api/orderApi.ts ---
+// Pengganti penuh. Sudah memuat:
+//  - perbaikan edit order (ukuran Large + diskon dihitung benar)
+//  - antrean membawa source (web/barista), outlet_id, table_number
+//  - updateOrderStatus mendukung status 'spam' (pesanan palsu tetap tersimpan di riwayat)
+
 import { supabase } from './supabaseClient';
 import type { User } from '@supabase/supabase-js';
 import type { Product, Category, CartItem, PendingOrderWithItems, PaymentMethod } from '../types';
 
 // ---------------------------------------------
-//  Helper & Types untuk normalisasi dari Supabase
+// Helper & Types untuk normalisasi dari Supabase
 // ---------------------------------------------
 type RawOrderItem = {
   product_id: number;
   quantity: number;
-  size: "regular" | "large";   // ✅ add here
+  size: "regular" | "large";
   subtotal: number;
   product: Product | Product[] | null;
 };
@@ -22,35 +27,54 @@ type RawOrderRow = {
   payment_method: 'cash' | 'qris' | null;
   created_at: string;
   created_by?: string | null;
+  table_number?: string | null;
+  outlet_id?: number | null;
+  source?: 'barista' | 'web' | null;
   items?: RawOrderItem[] | null;
+};
+
+// Field tambahan yang dibawa ke UI (tidak mengubah tipe PendingOrderWithItems)
+export type OrderExtras = {
+  source?: 'barista' | 'web';
+  outlet_id?: number | null;
+  table_number?: string | null;
 };
 
 // Normalisasi 1 item
 const normalizeItem = (it: RawOrderItem & { size?: "regular" | "large" }) => ({
   product_id: it.product_id,
   quantity: it.quantity,
-  size: it.size, // 👈 do NOT force default, keep DB value
+  size: it.size, // jangan dipaksa default, pakai nilai dari DB
   subtotal: it.subtotal,
   product: Array.isArray(it.product) ? it.product[0] : it.product ?? undefined,
 });
 
-
-
-
 // Normalisasi 1 order
-const normalizeOrder = (row: RawOrderRow): PendingOrderWithItems => ({
+const normalizeOrder = (row: RawOrderRow): PendingOrderWithItems & OrderExtras => ({
   id: row.id,
   customer_name: row.customer_name,
   total_amount: row.total_amount ?? (row.items?.reduce((s, it) => s + it.subtotal, 0) ?? 0),
   status: row.status,
-  payment_method: row.payment_method ?? null, // null jika tidak ada
+  payment_method: row.payment_method ?? null,
   created_at: row.created_at,
   created_by: row.created_by ?? null,
   items: (row.items ?? []).map(normalizeItem),
+  source: row.source === 'web' ? 'web' : 'barista',
+  outlet_id: row.outlet_id ?? null,
+  table_number: row.table_number ?? null,
 });
 
+const ORDER_SELECT = `
+  id, customer_name, total_amount, status, payment_method, created_at, created_by,
+  table_number, outlet_id, source,
+  items:order_items (
+    product_id, quantity, size, subtotal,
+    product:products (*)
+  )
+`;
+
 // ---------------------------------------------
-//  Menu (products + categories)
+// Menu (products + categories)
 // ---------------------------------------------
 export const getActiveMenu = async (): Promise<{
   products: Product[];
@@ -69,50 +93,37 @@ export const getActiveMenu = async (): Promise<{
 };
 
 // ---------------------------------------------
-//  Pending orders (dengan items & product) — untuk Queue
+// Pending orders (dengan items & product) — untuk Queue
 // ---------------------------------------------
 export const getPendingOrdersWithItems = async (): Promise<PendingOrderWithItems[]> => {
   const { data, error } = await supabase
     .from('orders')
-    .select(`
-      id, customer_name, total_amount, status, payment_method, created_at, created_by,
-      items:order_items (
-        product_id, quantity, size, subtotal,
-        product:products (*)
-      )
-    `)
+    .select(ORDER_SELECT)
     .eq('status', 'pending')
     .order('created_at', { ascending: true });
 
   if (error) throw error;
 
-  const rows = ((data ?? []) as RawOrderRow[]).map(normalizeOrder);
-  return rows;
-  
+  return ((data ?? []) as unknown as RawOrderRow[]).map(normalizeOrder);
 };
 
 // ---------------------------------------------
-//  Ambil satu order untuk mode edit (items + product)
+// Ambil satu order untuk mode edit (items + product)
 // ---------------------------------------------
 export const getOrderWithItems = async (orderId: number): Promise<PendingOrderWithItems> => {
   const { data, error } = await supabase
     .from('orders')
-    .select(`
-      id, customer_name, total_amount, status, payment_method, created_at, created_by,
-      items:order_items (
-        product_id, quantity, size, subtotal,
-        product:products (*)
-      )
-    `)
+    .select(ORDER_SELECT)
     .eq('id', orderId)
     .single();
 
   if (error) throw error;
-  return normalizeOrder(data as RawOrderRow);
+
+  return normalizeOrder(data as unknown as RawOrderRow);
 };
 
 // ---------------------------------------------
-//  CREATE order baru (+ order_items) — wajib payment_method
+// CREATE order baru (+ order_items) — wajib payment_method
 // ---------------------------------------------
 export const createOrder = async (
   cartItems: CartItem[],
@@ -140,11 +151,12 @@ export const createOrder = async (
     order_id: orderData.id,
     product_id: item.id,
     quantity: item.quantity,
-    size: item.size, // ✅ store size
+    size: item.size,
     subtotal: item.price * item.quantity,
   }));
 
   const { error: itemsError } = await supabase.from('order_items').insert(orderItemsData);
+
   if (itemsError) {
     await supabase.from('orders').delete().eq('id', orderData.id);
     throw itemsError;
@@ -154,16 +166,23 @@ export const createOrder = async (
 };
 
 // ---------------------------------------------
-//  UPDATE status order
+// UPDATE status order
 // ---------------------------------------------
-export const updateOrderStatus = async (orderId: number, status: 'completed' | 'cancelled') => {
+// 'spam' = pesanan palsu: hilang dari antrean dan tidak dihitung sebagai penjualan,
+// tetapi tetap tersimpan di riwayat order.
+export const updateOrderStatus = async (
+  orderId: number,
+  status: 'completed' | 'cancelled' | 'spam',
+) => {
   const { data, error } = await supabase.from('orders').update({ status }).eq('id', orderId);
   if (error) throw error;
   return data;
 };
 
 // ---------------------------------------------
-//  UPDATE order + items (mode edit)
+// UPDATE order + items (mode edit)
+// - diskon ikut dihitung (sama dengan saat menambah ke keranjang)
+// - perhitungan disiapkan dulu sebelum item lama dihapus
 // ---------------------------------------------
 export const updateOrderAndItems = async (
   orderId: number,
@@ -200,7 +219,6 @@ export const updateOrderAndItems = async (
     const prod = priceMap.get(x.product_id);
     const base =
       x.size === 'large' && prod?.price_large ? prod.price_large : prod?.price ?? 0;
-    // Rumus diskon sama dengan saat menambah ke keranjang (BaristaPage & CartDropdown)
     const unitPrice = prod?.discount
       ? Math.round(base - (base * prod.discount) / 100)
       : base;
@@ -242,4 +260,3 @@ export const updateOrderAndItems = async (
 
   return { id: orderId, total_amount: newTotal };
 };
-

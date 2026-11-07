@@ -15,7 +15,7 @@ import { useAuth } from "../../auth/hooks/useAuth";
 import { useProfile } from "../../auth/hooks/useProfile";
 import { supabase } from "../../api/supabaseClient";
 import OutletGate from "../../components/OutletGate";
-
+import { OUTLETS } from "../../config/outlets";
 import {
   Button,
   Card,
@@ -41,6 +41,9 @@ const fmtIDR = (n: number) =>
   new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR" }).format(
     n
   );
+
+const QUEUE_USE_REALTIME = true;
+const QUEUE_REFRESH_MS = QUEUE_USE_REALTIME ? 5 * 60 * 1000 : 15 * 1000;
 
 // Small icon
 const TrashIcon = () => (
@@ -244,73 +247,127 @@ const PendingOrdersList = ({
   orders,
   onUpdateStatus,
   onEdit,
+  onSpam,
 }: {
   orders: PendingOrderWithItems[];
   onUpdateStatus: (orderId: number, status: "completed" | "cancelled") => void;
   onEdit: (orderId: number) => void;
+  onSpam: (orderId: number) => void;
 }) => (
   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-    {orders.map((order) => (
-      <Card key={order.id} shadow="sm" className="bg-yellow-50">
-        <CardBody className="space-y-2">
-          <div>
-            <p className="font-bold text-lg break-words">{order.customer_name}</p>
-            {order.payment_method && (
-              <Chip size="sm" variant="flat" color="primary" className="mt-1">
-                {order.payment_method.toUpperCase()}
-              </Chip>
-            )}
-          </div>
+    {orders.length === 0 && (
+      <div className="col-span-full text-default-500">
+        Tidak ada pesanan yang menunggu.
+      </div>
+    )}
 
-          <Divider />
+    {orders.map((order) => {
+      // source / outlet_id / table_number dibawa oleh orderApi.ts
+      const meta = order as any;
+      const isWeb = meta.source === "web";
+      const floor = OUTLETS.find((o) => o.id === meta.outlet_id)?.name;
 
-          <div className="text-sm text-default-700 space-y-1">
-            {(order.items ?? []).map((it) => (
-              <div
-                key={`${order.id}-${it.product_id}-${it.size}`}
-                className="flex justify-between"
-              >
-                <span className="truncate">
-                  {(it.product?.name ?? "Item")} ({it.size})
-                </span>
-                <span className="ml-2 font-medium">×{it.quantity}</span>
+      return (
+        <Card
+          key={order.id}
+          shadow="sm"
+          className={isWeb ? "bg-blue-50" : "bg-yellow-50"}
+        >
+          <CardBody className="space-y-2">
+            <div>
+              <p className="font-bold text-lg break-words">{order.customer_name}</p>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {isWeb && (
+                  <Chip size="sm" variant="solid" color="secondary">
+                    WEB #{order.id}
+                  </Chip>
+                )}
+                {floor && (
+                  <Chip size="sm" variant="flat">
+                    {floor}
+                  </Chip>
+                )}
+                {meta.table_number && (
+                  <Chip size="sm" variant="flat">
+                    Meja {meta.table_number}
+                  </Chip>
+                )}
+                {order.payment_method && (
+                  <Chip size="sm" variant="flat" color="primary">
+                    {order.payment_method.toUpperCase()}
+                  </Chip>
+                )}
               </div>
-            ))}
-            {(!order.items || order.items.length === 0) && (
-              <div className="text-default-400">Belum ada item.</div>
-            )}
-          </div>
+            </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2">
-            <Button
-              size="sm"
-              color="primary"
-              className="w-full"
-              onPress={() => onEdit(order.id)}
-            >
-              Edit
-            </Button>
-            <Button
-              size="sm"
-              color="success"
-              className="w-full"
-              onPress={() => onUpdateStatus(order.id, "completed")}
-            >
-              Selesai
-            </Button>
-            <Button
-              size="sm"
-              color="danger"
-              variant="flat"
-              className="w-full"
-              onPress={() => onUpdateStatus(order.id, "cancelled")}
-            >
-              Batal
-            </Button>
-          </div>
-        </CardBody>
-      </Card>
-    ))}
+            <Divider />
+
+            <div className="text-sm text-default-700 space-y-1">
+              {(order.items ?? []).map((it) => (
+                <div
+                  key={`${order.id}-${it.product_id}-${it.size}`}
+                  className="flex justify-between"
+                >
+                  <span className="truncate">
+                    {it.product?.name ?? "Item"} ({it.size})
+                  </span>
+                  <span className="ml-2 font-medium">×{it.quantity}</span>
+                </div>
+              ))}
+              {(!order.items || order.items.length === 0) && (
+                <div className="text-default-400">Belum ada item.</div>
+              )}
+            </div>
+
+            <div className="flex justify-between text-sm font-semibold">
+              <span>Total</span>
+              <span>{fmtIDR(order.total_amount)}</span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2">
+              <Button
+                size="sm"
+                color="primary"
+                className="w-full"
+                onPress={() => onEdit(order.id)}
+              >
+                Edit
+              </Button>
+              <Button
+                size="sm"
+                color="success"
+                className="w-full"
+                onPress={() => onUpdateStatus(order.id, "completed")}
+              >
+                Selesai
+              </Button>
+              <Button
+                size="sm"
+                color="danger"
+                variant="flat"
+                className="w-full"
+                onPress={() => onUpdateStatus(order.id, "cancelled")}
+              >
+                Batal
+              </Button>
+
+              {/* Hanya untuk pesanan web: tandai bila spam / palsu (riwayat tetap ada) */}
+              {isWeb && (
+                <Button
+                  size="sm"
+                  color="warning"
+                  variant="bordered"
+                  className="w-full sm:col-span-3"
+                  onPress={() => onSpam(order.id)}
+                >
+                  Tandai Spam / Palsu
+                </Button>
+              )}
+            </div>
+          </CardBody>
+        </Card>
+      );
+    })}
   </div>
 );
 
@@ -393,7 +450,7 @@ export default function BaristaPage() {
     const { data, error } = await supabase
       .from("orders")
       .select("total_amount,payment_method,created_at")
-      .eq("created_by", user.id)
+      .or(`created_by.eq.${user.id},handled_by.eq.${user.id}`)
       .eq("status", "completed")
       .gte("created_at", start.toISOString())
       .lte("created_at", end.toISOString());
@@ -463,9 +520,45 @@ export default function BaristaPage() {
     };
   }, [fetchPending, fetchTodaySummary]);
 
-  useEffect(() => {
+    useEffect(() => {
     fetchAttendanceStatus();
   }, [fetchAttendanceStatus]);
+
+  // REALTIME: dengarkan perubahan tabel orders (pesanan web masuk, status berubah,
+  // pesanan dihapus) dan segarkan antrean + ringkasan seketika.
+  useEffect(() => {
+    if (!QUEUE_USE_REALTIME) return;
+
+    const ch = supabase
+      .channel("orders-db-changes")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "orders" },
+        () => {
+          fetchPending();
+          fetchTodaySummary();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(ch);
+    };
+  }, [fetchPending, fetchTodaySummary]);
+
+  // PENGAMAN: segarkan berkala, dan langsung saat halaman kembali terlihat
+  // (mis. setelah layar HP dinyalakan lagi).
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") fetchPending();
+    };
+    const t = window.setInterval(refresh, QUEUE_REFRESH_MS);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [fetchPending]);
 
   const handleLogout = async () => {
     await logout();
@@ -614,7 +707,30 @@ export default function BaristaPage() {
       await fetchTodaySummary();
       if (editingOrderId === orderId) cancelEdit();
     } catch (error: any) {
-      alert(`Gagal mengubah status order: ${error.message}`);
+            alert(`Gagal mengubah status order: ${error.message}`);
+    }
+  };
+
+  // Tandai pesanan palsu / spam. Pesanan tidak dihapus: hilang dari antrean dan tidak
+  // dihitung sebagai penjualan, tetapi tetap ada di riwayat order (dengan nama barista
+  // yang menandainya).
+  const handleMarkSpam = async (orderId: number) => {
+    const ok = window.confirm(
+      "Tandai pesanan ini sebagai spam / palsu?\n\n" +
+        "Pesanan akan hilang dari antrean dan tidak dihitung sebagai penjualan, " +
+        "tetapi tetap tersimpan di riwayat. " +
+        "Untuk pesanan yang dibatalkan pelanggan, gunakan tombol Batal."
+    );
+    if (!ok) return;
+
+    try {
+      await updateOrderStatus(orderId, "spam");
+      await sendOrdersUpdated({ source: "status", orderId, status: "spam" });
+      await fetchPending();
+      await fetchTodaySummary();
+      if (editingOrderId === orderId) cancelEdit();
+    } catch (error: any) {
+      alert(`Gagal menandai spam: ${error.message}`);
     }
   };
 
@@ -979,6 +1095,7 @@ export default function BaristaPage() {
                 orders={pendingOrders}
                 onUpdateStatus={handleUpdateStatus}
                 onEdit={handleEditStart}
+                onSpam={handleMarkSpam}
               />
             </ModalBody>
           </>

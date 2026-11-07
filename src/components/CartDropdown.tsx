@@ -1,6 +1,9 @@
 // --- FILE: src/components/CartDropdown.tsx ---
 // Deskripsi: Dropdown keranjang dengan pembayaran Cash / QRIS
 // - Menampilkan size (regular/large) dan menggunakan harga langsung dari DB
+// - Modal konfirmasi meminta lantai, nama, dan nomor meja, lalu mengirim ke WhatsApp
+// - Kedua modal bisa di-scroll di layar kecil (header & tombol tetap terlihat)
+
 import React, { useState, useEffect } from "react";
 import {
   Dropdown,
@@ -10,6 +13,7 @@ import {
   Button,
   Badge,
   Divider,
+  Input,
   RadioGroup,
   Radio,
   Modal,
@@ -18,13 +22,13 @@ import {
   ModalBody,
   ModalFooter,
   useDisclosure,
-  Input
 } from "@heroui/react";
 import { Icon } from "@iconify/react";
 import { useCart, PaymentMethod } from "../components/CartContext";
 import { generateQrisBase64 } from "@/components/qris";
-import { Product } from "../types";
 import { OUTLETS } from "@/config/outlets";
+import { createCustomerOrder } from "@/api/customerOrderApi";
+import { Product } from "../types";
 
 // Helper: ambil harga unit dari DB berdasarkan size
 function getUnitPriceFromDB(product: Product, size: "regular" | "large") {
@@ -41,22 +45,26 @@ function getUnitPriceFromDB(product: Product, size: "regular" | "large") {
 
 export const CartDropdown: React.FC = () => {
   const {
-  cartItems,
-  removeFromCart,
-  updateQuantity,
-  totalItems,
-  paymentMethod,
-  setPaymentMethod,
-  clearCart,
-  outletId,
-  setOutletId,
-  tableNumber,
-  setTableNumber,
-  customerName,
-  setCustomerName,
-} = useCart();
+    cartItems,
+    removeFromCart,
+    updateQuantity,
+    totalItems,
+    paymentMethod,
+    setPaymentMethod,
+    clearCart,
+    outletId,
+    setOutletId,
+    tableNumber,
+    setTableNumber,
+    customerName,
+    setCustomerName,
+  } = useCart();
 
-const outlet = OUTLETS.find((o) => o.id === outletId);
+  const outlet = OUTLETS.find((o) => o.id === outletId);
+
+  // Dropdown keranjang dikontrol manual supaya bisa ditutup saat checkout.
+  // Sebelumnya dropdown tetap terbuka di belakang modal dan ikut mengunci scroll.
+  const [isCartOpen, setIsCartOpen] = useState(false);
 
   // Hitung total dari cart berdasarkan harga DB + size
   const cartTotal = cartItems.reduce((sum, item) => {
@@ -73,6 +81,8 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
 
   const [qrisDataUri, setQrisDataUri] = useState<string>("");
   const [loadingQris, setLoadingQris] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const [selectedPayment, setSelectedPayment] =
     useState<PaymentMethod>(paymentMethod);
 
@@ -88,11 +98,18 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
     }
   }, [isOpenFirstModal, selectedPayment, cartTotal]);
 
-  const handleQuantityChange = (productId: number, change: number) => {
-    const item = cartItems.find((i) => i.product.id === productId);
+  // [DIPERBAIKI] Ubah jumlah berdasarkan produk DAN ukuran, supaya baris
+  // Regular dan Large dari produk yang sama tidak saling mengubah.
+  const handleQuantityChange = (
+    productId: number,
+    size: "regular" | "large",
+    change: number
+  ) => {
+    const item = cartItems.find(
+      (i) => i.product.id === productId && i.size === size
+    );
     if (!item) return;
-    const nextQty = item.quantity + change;
-    updateQuantity(productId, item.size, nextQty);
+    updateQuantity(productId, size, item.quantity + change);
   };
 
   const handlePaymentChange = (value: string) => {
@@ -102,6 +119,7 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
   const handleCheckout = () => {
     if (!selectedPayment) return;
     setPaymentMethod(selectedPayment);
+    setIsCartOpen(false); // tutup dropdown dulu, baru buka modal
     onOpenFirstModal();
   };
 
@@ -126,6 +144,42 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
   const [selectedCashOption, setSelectedCashOption] = useState<string>("");
   const [inputAmount, setInputAmount] = useState<string>("");
 
+  // Pengaman scroll: setelah dropdown dan kedua modal tertutup, pastikan halaman
+  // tidak tertinggal dalam keadaan terkunci. Dijalankan juga saat pengguna kembali
+  // dari tab/aplikasi WhatsApp, karena animasi penutup modal bisa tertunda selama
+  // halaman berada di latar belakang.
+  const anyOverlayOpen = isCartOpen || isOpenFirstModal || isOpenSecondModal;
+
+  useEffect(() => {
+    if (anyOverlayOpen) return;
+
+    const unlock = () => {
+      const html = document.documentElement;
+      const body = document.body;
+      html.style.removeProperty("overflow");
+      body.style.removeProperty("overflow");
+      html.style.removeProperty("padding-right");
+      body.style.removeProperty("padding-right");
+    };
+
+    const onReturn = () => {
+      if (document.visibilityState === "visible") unlock();
+    };
+
+    unlock();
+    const t = window.setTimeout(unlock, 500); // sesudah animasi penutup selesai
+    document.addEventListener("visibilitychange", onReturn);
+    window.addEventListener("pageshow", onReturn);
+    window.addEventListener("focus", onReturn);
+
+    return () => {
+      window.clearTimeout(t);
+      document.removeEventListener("visibilitychange", onReturn);
+      window.removeEventListener("pageshow", onReturn);
+      window.removeEventListener("focus", onReturn);
+    };
+  }, [anyOverlayOpen]);
+
   const handleConfirmOrder = () => {
     onOpenChangeFirstModal(); // close modal 1
     onOpenSecondModal(); // open modal 2
@@ -133,10 +187,120 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
     setInputAmount("");
   };
 
+  // Tombol "Konfirmasi" aktif bila lantai & nama terisi (dan opsi cash lengkap)
+  const confirmDisabled =
+    !outletId ||
+    !customerName.trim() ||
+    (paymentMethod === "cash" &&
+      (!selectedCashOption ||
+        (selectedCashOption === "input_amount" && !inputAmount)));
+
+  // Susun isi pesan WhatsApp. orderId & total dari server (bila pesanan tersimpan).
+  const buildWhatsAppUrl = (saved?: { orderId: number; total: number }) => {
+    const headerLines = [
+      saved ? `Pesanan Web #${saved.orderId}` : "Pesanan (belum masuk antrean)",
+      `Outlet: ${outlet?.name ?? "-"}`,
+      `Nama: ${customerName.trim()}`,
+      tableNumber ? `Meja: ${tableNumber}` : null,
+      `Pembayaran: ${(paymentMethod ?? "").toUpperCase()}`,
+      "",
+    ].filter((l): l is string => l !== null);
+
+    const itemsLines = cartItems.map((item) => {
+      const unit = getUnitPriceFromDB(item.product as any, item.size);
+      return `${item.product.name} (${item.size}) x${
+        item.quantity
+      } = Rp.${(unit * item.quantity).toFixed(0)}`;
+    });
+
+    const totalLine = `Total: Rp.${(saved ? saved.total : cartTotal).toFixed(0)}`;
+
+    let lines: string[];
+    if (paymentMethod === "qris") {
+      lines = [...headerLines, ...itemsLines, totalLine];
+    } else {
+      let uangLine = "";
+      if (selectedCashOption === "input_amount") {
+        uangLine = `Jumlah Uang yang akan dibayarkan: Rp.${inputAmount}`;
+      } else if (selectedCashOption === "100") {
+        uangLine = `Jumlah Uang yang akan dibayarkan: Rp.100000`;
+      } else if (selectedCashOption === "50") {
+        uangLine = `Jumlah Uang yang akan dibayarkan: Rp.50000`;
+      }
+      lines = [...headerLines, ...itemsLines, totalLine, uangLine];
+    }
+
+    return `https://api.whatsapp.com/send/?phone=${phoneNumber}&text=${encodeURIComponent(
+      lines.join("\n")
+    )}`;
+  };
+
+  // Simpan pesanan ke antrean barista, lalu buka WhatsApp (untuk bukti bayar / catatan).
+  const handleSubmitOrder = async (closeModal: () => void) => {
+    if (!phoneNumber) {
+      alert("Nomor WhatsApp belum dikonfigurasi.");
+      return;
+    }
+    if (!outletId || (paymentMethod !== "cash" && paymentMethod !== "qris")) return;
+    if (submitting) return;
+
+    setSubmitError("");
+    setSubmitting(true);
+
+    // Buka tab WhatsApp SEKARANG (masih di dalam klik pengguna), alamatnya diisi
+    // setelah pesanan tersimpan. Jika window.open dipanggil sesudah 'await',
+    // banyak browser (terutama Safari iOS) memblokirnya sebagai popup.
+    const waTab = window.open("", "_blank");
+
+    try {
+      const saved = await createCustomerOrder({
+        outletId,
+        customerName,
+        tableNumber,
+        paymentMethod,
+        items: cartItems.map((i) => ({
+          product_id: i.product.id,
+          quantity: i.quantity,
+          size: i.size,
+        })),
+      });
+
+      const url = buildWhatsAppUrl(saved);
+      closeModal();
+      clearCart();
+
+      if (waTab) waTab.location.href = url;
+      else window.location.href = url; // popup diblokir: pakai tab ini
+    } catch (e: any) {
+      waTab?.close();
+      setSubmitError(e?.message ?? "Gagal menyimpan pesanan.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Cadangan bila pesanan gagal tersimpan: kirim lewat WhatsApp saja,
+  // barista menginput manual seperti sebelumnya.
+  const handleWhatsAppOnly = (closeModal: () => void) => {
+    if (!phoneNumber) {
+      alert("Nomor WhatsApp belum dikonfigurasi.");
+      return;
+    }
+    const url = buildWhatsAppUrl();
+    closeModal();
+    clearCart();
+    setSubmitError("");
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
   return (
     <>
       {/* ========== Dropdown Keranjang ========== */}
-      <Dropdown placement="bottom-end">
+      <Dropdown
+        placement="bottom-end"
+        isOpen={isCartOpen}
+        onOpenChange={setIsCartOpen}
+      >
         <DropdownTrigger>
           <Button
             isIconOnly
@@ -157,6 +321,7 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
             )}
           </Button>
         </DropdownTrigger>
+
         <DropdownMenu
           aria-label="Cart Items"
           className="w-80"
@@ -171,6 +336,7 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
           >
             <p className="text-lg font-semibold">Shopping Cart</p>
           </DropdownItem>
+
           <DropdownItem key="divider-1" isReadOnly textValue="Divider">
             <Divider />
           </DropdownItem>
@@ -244,7 +410,7 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
                           size="sm"
                           variant="flat"
                           onPress={() =>
-                            handleQuantityChange(item.product.id, -1)
+                            handleQuantityChange(item.product.id, item.size, -1)
                           }
                         >
                           <Icon
@@ -260,7 +426,7 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
                           size="sm"
                           variant="flat"
                           onPress={() =>
-                            handleQuantityChange(item.product.id, 1)
+                            handleQuantityChange(item.product.id, item.size, 1)
                           }
                         >
                           <Icon icon="lucide:plus" style={{ fontSize: 14 }} />
@@ -346,7 +512,13 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
       </Dropdown>
 
       {/* ========== Modal QRIS / Cash ========== */}
-      <Modal isOpen={isOpenFirstModal} onOpenChange={onOpenChangeFirstModal}>
+      {/* scrollBehavior="inside": isi modal bisa di-scroll, header & tombol tetap terlihat */}
+      <Modal
+        isOpen={isOpenFirstModal}
+        onOpenChange={onOpenChangeFirstModal}
+        scrollBehavior="inside"
+        placement="center"
+      >
         <ModalContent>
           {(onClose) => (
             <>
@@ -356,21 +528,6 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
                   : "Cash Payment"}
               </ModalHeader>
               <ModalBody>
-                <RadioGroup
-                  label="Lantai"
-                  orientation="horizontal"
-                  isRequired
-                  value={outletId ? String(outletId) : ""}
-                  onValueChange={(v) => setOutletId(Number(v))}
-                >
-                  {OUTLETS.map((o) => (
-                    <Radio key={o.id} value={String(o.id)}>
-                      {o.name}
-                    </Radio>
-                  ))}
-                </RadioGroup>
-                <Input label="Nama" isRequired value={customerName} onValueChange={setCustomerName} />
-                <Input label="Nomor meja (opsional)" value={tableNumber} onValueChange={setTableNumber} />
                 {paymentMethod === "qris" ? (
                   <div className="flex flex-col items-center">
                     <div className="border border-default-200 p-4 rounded-lg mb-4">
@@ -386,6 +543,7 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
                         />
                       )}
                     </div>
+
                     <p className="text-center text-default-500 mb-3">
                       Scan kode di atas untuk membayar Rp
                       {cartTotal.toLocaleString("id-ID")}
@@ -403,10 +561,11 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
                         Download QR
                       </Button>
                     )}
+
                     <p className="text-center text-xs text-default-400 mt-2">
                       Simpan gambar ini lalu buka sendiri aplikasi
                       Bank/e-wallet Anda untuk scan dari galeri.
-                      Setelah melakukan pembayaran, Harap kembali ke web untuk 
+                      Setelah melakukan pembayaran, Harap kembali ke web untuk
                       konfirmasi dan melanjutkan pesanan
                     </p>
                   </div>
@@ -437,14 +596,46 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
       </Modal>
 
       {/* ========== Modal Konfirmasi Order ========== */}
-      <Modal isOpen={isOpenSecondModal} onOpenChange={onOpenChangeSecondModal}>
+      {/* Isian Lantai / Nama / Meja ada DI SINI (bukan di modal pembayaran di atas) */}
+      <Modal
+        isOpen={isOpenSecondModal}
+        onOpenChange={onOpenChangeSecondModal}
+        scrollBehavior="inside"
+        placement="center"
+      >
         <ModalContent>
           {(onClosePrompt) => (
             <>
               <ModalHeader>Konfirmasi Order</ModalHeader>
-              <ModalBody>
+              <ModalBody className="gap-4">
+                <RadioGroup
+                  label="Lantai"
+                  orientation="horizontal"
+                  isRequired
+                  value={outletId ? String(outletId) : ""}
+                  onValueChange={(v) => setOutletId(Number(v))}
+                >
+                  {OUTLETS.map((o) => (
+                    <Radio key={o.id} value={String(o.id)}>
+                      {o.name}
+                    </Radio>
+                  ))}
+                </RadioGroup>
+
+                <Input
+                  label="Nama"
+                  isRequired
+                  value={customerName}
+                  onValueChange={setCustomerName}
+                />
+                <Input
+                  label="Nomor meja (opsional)"
+                  value={tableNumber}
+                  onValueChange={setTableNumber}
+                />
+
                 {paymentMethod === "qris" ? (
-                  <p>
+                  <p className="text-sm text-default-500">
                     Silahkan konfirmasi orderan Anda. Jika Anda menggunakan
                     QRIS maka lampirkan bukti pembayarannya. Jika ada pesan
                     lainnya, tolong tambahkan setelah mengirim pesan ini.
@@ -457,75 +648,51 @@ const outlet = OUTLETS.find((o) => o.id === outletId);
                     setInputAmount={setInputAmount}
                   />
                 )}
+
+                <p className="text-xs text-default-400">
+                  Pesanan Anda akan masuk ke antrean barista di lantai yang dipilih,
+                  lalu WhatsApp terbuka untuk melampirkan bukti pembayaran atau catatan.
+                </p>
+
+                {submitError && (
+                  <div className="rounded-lg border border-danger-200 bg-danger-50 p-3 text-sm text-danger">
+                    <p className="font-medium">Pesanan belum tersimpan</p>
+                    <p>{submitError}</p>
+                    <p className="mt-1 text-default-600">
+                      Anda bisa mencoba lagi, atau kirim lewat WhatsApp saja dan barista
+                      akan mencatatnya secara manual.
+                    </p>
+                  </div>
+                )}
               </ModalBody>
-              <ModalFooter className="gap-2">
+              <ModalFooter className="gap-2 flex-wrap">
                 <Button
                   color="danger"
                   variant="light"
-                  onPress={() => onClosePrompt()}
+                  isDisabled={submitting}
+                  onPress={() => {
+                    setSubmitError("");
+                    onClosePrompt();
+                  }}
                 >
                   Cancel
                 </Button>
+                {submitError && (
+                  <Button
+                    variant="flat"
+                    isDisabled={submitting}
+                    onPress={() => handleWhatsAppOnly(onClosePrompt)}
+                  >
+                    Kirim via WhatsApp saja
+                  </Button>
+                )}
                 <Button
                   color="primary"
-                  isDisabled={
-                    !outletId ||
-                    !customerName.trim() ||
-                    (paymentMethod === "cash" &&
-                      (!selectedCashOption ||
-                        (selectedCashOption === "input_amount" && !inputAmount)))
-                  }
-                  onPress={() => {
-                    // susun pesan WhatsApp
-                    const itemsLines = cartItems.map((item) => {
-                      const unit = getUnitPriceFromDB(
-                        item.product as any,
-                        item.size
-                      );
-                      return `${item.product.name} (${item.size}) x${
-                        item.quantity
-                      } = Rp.${(unit * item.quantity).toFixed(0)}`;
-                    });
-                    const totalLine = `Total: Rp.${cartTotal.toFixed(0)}`;
-                    if (!phoneNumber) return;
-                    const headerLines = [
-                      `Outlet: ${outlet?.name ?? "-"}`,
-                      `Nama: ${customerName.trim()}`,
-                      tableNumber ? `Meja: ${tableNumber}` : null,
-                      `Pembayaran: ${(paymentMethod ?? "").toUpperCase()}`,
-                      "",
-                    ].filter((l): l is string => l !== null);
-
-
-                    if (paymentMethod === "qris") {
-                      const text = [...headerLines, ...itemsLines, totalLine].join("\n");
-                      const url = `https://api.whatsapp.com/send/?phone=${phoneNumber}&text=${encodeURIComponent(
-                        text
-                      )}`;
-                      window.open(url, "_blank");
-                      clearCart();
-                      onClosePrompt();
-                    } else {
-                      let uangLine = "";
-                      if (selectedCashOption === "input_amount") {
-                        uangLine = `Jumlah Uang yang akan dibayarkan: Rp.${inputAmount}`;
-                      } else if (selectedCashOption === "100") {
-                        uangLine = `Jumlah Uang yang akan dibayarkan: Rp.100000`;
-                      } else if (selectedCashOption === "50") {
-                        uangLine = `Jumlah Uang yang akan dibayarkan: Rp.50000`;
-                      }
-
-                      const text = [...headerLines, ...itemsLines, totalLine, uangLine].join("\n");
-                      const url = `https://api.whatsapp.com/send/?phone=${phoneNumber}&text=${encodeURIComponent(
-                        text
-                      )}`;
-                      window.open(url, "_blank");
-                      clearCart();
-                      onClosePrompt();
-                    }
-                  }}
+                  isDisabled={confirmDisabled || submitting}
+                  isLoading={submitting}
+                  onPress={() => handleSubmitOrder(onClosePrompt)}
                 >
-                  Konfirmasi
+                  {submitError ? "Coba Lagi" : "Konfirmasi"}
                 </Button>
               </ModalFooter>
             </>
@@ -553,6 +720,7 @@ function CashConfirmForm(props: {
   return (
     <div className="flex flex-col gap-4">
       <p>Pilih Pecahan Uang yang akan dibayarkan:</p>
+
       <RadioGroup
         orientation="vertical"
         value={selectedCashOption}

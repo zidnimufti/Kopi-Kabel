@@ -3,6 +3,8 @@
 //
 // - Menampilkan lantai tempat barista bertugas + tombol "Pindah lantai".
 // - Bila absen terbaru belum punya lantai, muncul dialog yang WAJIB diisi.
+// - Saat pindah lantai dan MASIH ADA pesanan menunggu di lantai yang ditinggalkan,
+//   muncul peringatan dengan pilihan "Kembali" atau "Tetap pindah".
 // - Bila shift pada absen terbaru sudah berakhir (dan barista belum absen pulang),
 //   muncul pengingat "Absen shift baru". Tidak ada pindah halaman otomatis,
 //   supaya keranjang yang sedang dibuat tidak hilang.
@@ -19,6 +21,7 @@ import {
   ModalHeader,
   useDisclosure,
 } from "@heroui/react";
+import { supabase } from "../api/supabaseClient";
 import { useAuth } from "../auth/hooks/useAuth";
 import {
   getTodayAttendance,
@@ -26,6 +29,12 @@ import {
   setMyOutlet,
 } from "../api/attandance";
 import { OUTLETS } from "../config/outlets";
+
+// Info peringatan: jumlah pesanan yang masih menunggu di lantai yang akan ditinggalkan
+interface LeaveWarning {
+  total: number;
+  web: number;
+}
 
 export default function OutletGate() {
   const auth = useAuth() as any;
@@ -39,6 +48,8 @@ export default function OutletGate() {
   const [expired, setExpired] = useState(false);
   const [picked, setPicked] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [warning, setWarning] = useState<LeaveWarning | null>(null);
   const [error, setError] = useState("");
   const { isOpen, onOpen, onClose } = useDisclosure();
 
@@ -72,13 +83,28 @@ export default function OutletGate() {
     return () => clearInterval(t);
   }, [shift, clockedOut]);
 
-  const save = async () => {
+  const openModal = () => {
+    setPicked(outletId);
+    setWarning(null);
+    setError("");
+    onOpen();
+  };
+
+  const closeModal = () => {
+    setWarning(null);
+    setError("");
+    onClose();
+  };
+
+  // Benar-benar memindahkan lantai
+  const doSwitch = async () => {
     if (!picked) return;
     setSaving(true);
     setError("");
     try {
       await setMyOutlet(picked);
       setOutletId(picked);
+      setWarning(null);
       onClose();
       window.location.reload(); // muat ulang antrean sesuai lantai baru
     } catch (e: any) {
@@ -88,7 +114,42 @@ export default function OutletGate() {
     }
   };
 
+  // Tombol "Simpan lantai": bila pindah dari lantai yang sudah dipilih dan masih ada
+  // pesanan menunggu di sana, tampilkan peringatan dulu.
+  const save = async () => {
+    if (!picked) return;
+
+    if (outletId !== null && picked !== outletId) {
+      setChecking(true);
+      setError("");
+      try {
+        const { data, error: qErr } = await supabase
+          .from("orders")
+          .select("id, source")
+          .eq("status", "pending")
+          .eq("outlet_id", outletId);
+
+        if (!qErr && data && data.length > 0) {
+          setWarning({
+            total: data.length,
+            web: data.filter((o: any) => o.source === "web").length,
+          });
+          return; // tunggu keputusan barista
+        }
+        // Tidak ada pesanan menunggu (atau pengecekan gagal): lanjut pindah.
+      } catch {
+        /* pengecekan gagal: jangan menghalangi pindah lantai */
+      } finally {
+        setChecking(false);
+      }
+    }
+
+    await doSwitch();
+  };
+
   const current = OUTLETS.find((o) => o.id === outletId);
+  const fromName = current?.name ?? "lantai ini";
+  const toName = OUTLETS.find((o) => o.id === picked)?.name ?? "";
   const mustChoose = loaded && outletId === null;
 
   return (
@@ -97,7 +158,7 @@ export default function OutletGate() {
         <Chip color={current ? "primary" : "warning"} size="sm" variant="flat">
           {current ? current.name : "Lantai belum dipilih"}
         </Chip>
-        <Button size="sm" variant="light" onPress={onOpen}>
+        <Button size="sm" variant="light" onPress={openModal}>
           Pindah lantai
         </Button>
 
@@ -120,50 +181,86 @@ export default function OutletGate() {
 
       <Modal
         isOpen={isOpen}
-        onClose={onClose}
+        onClose={closeModal}
         isDismissable={!mustChoose}
         hideCloseButton={mustChoose}
         isKeyboardDismissDisabled={mustChoose}
         placement="center"
+        scrollBehavior="inside"
       >
         <ModalContent>
-          <ModalHeader>
-            {mustChoose ? "Pilih lantai bertugas" : "Pindah lantai"}
-          </ModalHeader>
-          <ModalBody className="gap-3">
-            <p className="text-sm text-default-500">
-              Order dan antrean yang Anda lihat mengikuti lantai yang dipilih.
-            </p>
-            <div className="flex gap-2">
-              {OUTLETS.map((o) => (
-                <Button
-                  key={o.id}
-                  className="flex-1"
-                  color={picked === o.id ? "primary" : "default"}
-                  variant={picked === o.id ? "solid" : "flat"}
-                  onPress={() => setPicked(o.id)}
-                >
-                  {o.name}
+          {warning ? (
+            <>
+              <ModalHeader>Masih ada pesanan menunggu</ModalHeader>
+              <ModalBody className="gap-3">
+                <div className="rounded-lg border border-warning-300 bg-warning-50 p-3 text-sm">
+                  <p className="font-semibold">
+                    {warning.total} pesanan belum selesai di {fromName}
+                    {warning.web > 0 ? ` (${warning.web} dari web)` : ""}.
+                  </p>
+                  <p className="mt-2 text-default-700">
+                    Jika Anda pindah ke {toName}, pesanan itu hanya terlihat oleh barista
+                    yang bertugas di {fromName}. Bila belum ada barista lain di sana,
+                    pelanggan akan menunggu tanpa ada yang tahu.
+                  </p>
+                </div>
+                <p className="text-xs text-default-500">
+                  Sebaiknya selesaikan, batalkan, atau serahkan dulu pesanan tersebut ke
+                  barista yang bertugas di {fromName}. Pesanan yang Anda buat sendiri tetap
+                  terlihat di antrean Anda.
+                </p>
+                {error && <p className="text-danger text-sm">{error}</p>}
+              </ModalBody>
+              <ModalFooter>
+                <Button variant="light" isDisabled={saving} onPress={() => setWarning(null)}>
+                  Kembali
                 </Button>
-              ))}
-            </div>
-            {error && <p className="text-danger text-sm">{error}</p>}
-          </ModalBody>
-          <ModalFooter>
-            {!mustChoose && (
-              <Button variant="light" onPress={onClose}>
-                Batal
-              </Button>
-            )}
-            <Button
-              color="primary"
-              isDisabled={!picked || picked === outletId}
-              isLoading={saving}
-              onPress={save}
-            >
-              Simpan lantai
-            </Button>
-          </ModalFooter>
+                <Button color="warning" isLoading={saving} onPress={doSwitch}>
+                  Tetap pindah
+                </Button>
+              </ModalFooter>
+            </>
+          ) : (
+            <>
+              <ModalHeader>
+                {mustChoose ? "Pilih lantai bertugas" : "Pindah lantai"}
+              </ModalHeader>
+              <ModalBody className="gap-3">
+                <p className="text-sm text-default-500">
+                  Order dan antrean yang Anda lihat mengikuti lantai yang dipilih.
+                </p>
+                <div className="flex gap-2">
+                  {OUTLETS.map((o) => (
+                    <Button
+                      key={o.id}
+                      className="flex-1"
+                      color={picked === o.id ? "primary" : "default"}
+                      variant={picked === o.id ? "solid" : "flat"}
+                      onPress={() => setPicked(o.id)}
+                    >
+                      {o.name}
+                    </Button>
+                  ))}
+                </div>
+                {error && <p className="text-danger text-sm">{error}</p>}
+              </ModalBody>
+              <ModalFooter>
+                {!mustChoose && (
+                  <Button variant="light" onPress={closeModal}>
+                    Batal
+                  </Button>
+                )}
+                <Button
+                  color="primary"
+                  isDisabled={!picked || picked === outletId}
+                  isLoading={saving || checking}
+                  onPress={save}
+                >
+                  Simpan lantai
+                </Button>
+              </ModalFooter>
+            </>
+          )}
         </ModalContent>
       </Modal>
     </>
