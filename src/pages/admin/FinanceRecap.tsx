@@ -4,7 +4,6 @@
 // dan fungsi finance_sales_daily yang mengecek is_admin()).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import * as XLSX from "xlsx";
 import {
   Button,
   Card,
@@ -33,11 +32,15 @@ import {
   createOtherIncome,
   deleteExpense,
   deleteOtherIncome,
+  getDeletedOrderLog,
   getExpenseCategoryMeta,
+  getExportOrderRows,
   getExpenses,
   getOtherIncomes,
+  getSalesByProduct,
   getSalesDaily,
   updateExpense,
+  setCategoryCogs,
   updateOtherIncome,
   type CategoryMeta,
   type Expense,
@@ -48,6 +51,9 @@ import {
 } from "@/api/FinanceApi";
 import { OUTLETS } from "@/config/outlets";
 import { buildReport, toInputDate } from "./finance/calc";
+import ProductCostTab from "./finance/ProductCostTab";
+import { buildAuditSpecs } from "./finance/auditSpecs";
+import { downloadAuditWorkbook } from "./finance/downloadAudit";
 
 // ===== Utils =====
 const fmtIDR = (n: number) =>
@@ -78,7 +84,7 @@ const FALLBACK_CATEGORIES = [
   "Lain-lain",
 ];
 
-type ViewTab = "labarugi" | "cashflow" | "pemasukan" | "pengeluaran" | "grafik";
+type ViewTab = "labarugi" | "cashflow" | "pemasukan" | "pengeluaran" | "hpp" | "grafik";
 
 const emptyExpenseForm = (category: string) => ({
   occurred_on: toInputDate(new Date()),
@@ -280,32 +286,94 @@ function CategoryTable({
   title,
   rows,
   total,
+  revenue,
+  expenses,
+  toCogs,
+  onMove,
 }: {
   title: string;
   rows: { category: string; total: number }[];
   total: number;
+  /** total pendapatan periode ini, untuk persentase terhadap pendapatan */
+  revenue: number;
+  /** semua pengeluaran periode ini, untuk rincian transaksi per kategori */
+  expenses: Expense[];
+  /** true bila tabel ini adalah tabel HPP; false bila tabel Biaya Operasional */
+  toCogs: boolean;
+  /** makeCogs = true: jadikan HPP, false: jadikan Biaya Operasional */
+  onMove: (category: string, makeCogs: boolean) => void | Promise<void>;
 }) {
+  const [open, setOpen] = useState<string | null>(null);
+  const [moving, setMoving] = useState<string | null>(null);
+
   return (
     <Card>
-      <CardBody className="space-y-2">
+      <CardBody className="space-y-1">
         <p className="font-semibold">{title}</p>
         {rows.length === 0 && (
           <p className="text-sm text-default-500">Belum ada data.</p>
         )}
-        {rows.map((r) => (
-          <div
-            key={r.category}
-            className="flex items-center justify-between gap-3 text-sm py-1 border-b border-default-100 last:border-0"
-          >
-            <span className="min-w-0 break-words">{r.category}</span>
-            <span className="shrink-0">
-              {fmtIDR(r.total)}{" "}
-              <span className="text-default-400">
-                ({total > 0 ? Math.round((r.total / total) * 100) : 0}%)
-              </span>
-            </span>
-          </div>
-        ))}
+        {rows.map((r) => {
+          const isOpen = open === r.category;
+          const items = isOpen ? expenses.filter((e) => e.category === r.category) : [];
+          const count = expenses.filter((e) => e.category === r.category).length;
+
+          return (
+            <div key={r.category} className="border-b border-default-100 last:border-0">
+              <button
+                aria-expanded={isOpen}
+                className="flex w-full items-center justify-between gap-3 py-2 text-left text-sm"
+                type="button"
+                onClick={() => setOpen(isOpen ? null : r.category)}
+              >
+                <span className="min-w-0 break-words">
+                  <span className="mr-1 text-default-400">{isOpen ? "▾" : "▸"}</span>
+                  {r.category}{" "}
+                  <span className="text-xs text-default-400">({count} transaksi)</span>
+                </span>
+                <span className="shrink-0 text-right">
+                  {fmtIDR(r.total)}
+                  <span className="block text-xs text-default-400">
+                    {total > 0 ? Math.round((r.total / total) * 100) : 0}% dari total
+                    {revenue > 0 ? ` · ${((r.total / revenue) * 100).toFixed(1)}% pendapatan` : ""}
+                  </span>
+                </span>
+              </button>
+
+              {isOpen && (
+                <div className="mb-2 space-y-2 rounded-lg bg-default-50 p-3">
+                  {items.map((e) => (
+                    <div key={e.id} className="flex items-start justify-between gap-3 text-xs">
+                      <span className="min-w-0 break-words">
+                        <span className="text-default-400">{fmtDate(e.occurred_on)}</span>
+                        {" · "}
+                        {e.description || "—"}
+                      </span>
+                      <span className="shrink-0">{fmtIDR(e.amount)}</span>
+                    </div>
+                  ))}
+                  <div className="pt-1">
+                    <Button
+                      isLoading={moving === r.category}
+                      size="sm"
+                      variant="flat"
+                      onPress={async () => {
+                        setMoving(r.category);
+                        try {
+                          await onMove(r.category, !toCogs); // pindah ke kelompok lawan
+                        } finally {
+                          setMoving(null);
+                        }
+                      }}
+                    >
+                      {toCogs ? "Pindahkan ke Biaya Operasional" : "Pindahkan ke HPP"}
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </CardBody>
     </Card>
   );
@@ -338,6 +406,7 @@ export default function FinanceRecapPage() {
   const [editingInc, setEditingInc] = useState<OtherIncome | null>(null);
   const [incForm, setIncForm] = useState(emptyIncomeForm);
 
+  const [exporting, setExporting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
@@ -373,6 +442,17 @@ export default function FinanceRecapPage() {
       .then(setCategoryMeta)
       .catch(() => setCategoryMeta([]));
   }, []);
+
+  // Pindahkan kategori antara HPP dan Biaya Operasional (menyimpan is_cogs di database)
+  const moveCategory = async (category: string, makeCogs: boolean) => {
+    try {
+      await setCategoryCogs(category, makeCogs);
+      setCategoryMeta(await getExpenseCategoryMeta());
+      setError(null);
+    } catch (err: any) {
+      setError(err?.message ?? "Gagal memindahkan kategori.");
+    }
+  };
 
   const report = useMemo(
     () =>
@@ -561,92 +641,61 @@ export default function FinanceRecapPage() {
     [incomes],
   );
 
-  // ----- Ekspor Excel -----
-  const exportExcel = () => {
-    const wb = XLSX.utils.book_new();
-    const r = report;
+  // ----- Ekspor Excel (paket audit, bisa diperiksa offline) -----
+  // Isi: Info, Cek Silang, Laba Rugi, Ringkasan Kategori, Pengeluaran Detail, Pemasukan Lain,
+  // HPP per Menu, Cashflow, Penjualan Harian/per Lantai, Order, Item Order, Log Hapus Order.
+  // Sheet yang datanya gagal diambil dilewati dan dicatat di sheet Info.
+  const exportExcel = async () => {
+    setExporting(true);
+    const warnings: string[] = [];
+    try {
+      const [orders, productSales, deletedLog] = await Promise.all([
+        getExportOrderRows(startDate, endDate).catch((e: any) => {
+          warnings.push(
+            `Sheet Order dan Item Order tidak dibuat: ${e?.message ?? e}. ` +
+              "Pastikan sql/08_export_audit.sql sudah dijalankan.",
+          );
+          return null;
+        }),
+        getSalesByProduct(startDate, endDate).catch((e: any) => {
+          warnings.push(
+            `Sheet HPP per Menu tidak dibuat: ${e?.message ?? e}. ` +
+              "Pastikan sql/07_hpp_menu.sql sudah dijalankan.",
+          );
+          return null;
+        }),
+        getDeletedOrderLog(startDate, endDate).catch((e: any) => {
+          warnings.push(
+            `Sheet Log Hapus Order tidak dibuat: ${e?.message ?? e}. ` +
+              "Pastikan sql/06_status_spam.sql sudah dijalankan.",
+          );
+          return null;
+        }),
+      ]);
 
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.aoa_to_sheet([
-        ["LAPORAN LABA / RUGI"],
-        ["Periode", `${startDate} s/d ${endDate}`],
-        [],
-        ["Penjualan (order completed)", r.salesTotal],
-        ["  Tunai", r.salesByMethod.cash],
-        ["  QRIS", r.salesByMethod.qris],
-        ["Pendapatan lain", r.otherRevenue],
-        ["Total Pendapatan", r.revenue],
-        ["HPP", -r.cogs],
-        ["Laba Kotor", r.grossProfit],
-        ["Biaya Operasional", -r.opex],
-        ["Laba / Rugi Bersih", r.netProfit],
-        [],
-        ["Jumlah order completed", r.ordersCount],
-      ]),
-      "Laba Rugi",
-    );
+      const specs = buildAuditSpecs({
+        start: startDate,
+        end: endDate,
+        exportedAt: new Date().toLocaleString("sv-SE", { timeZone: "Asia/Jakarta" }),
+        report,
+        sales,
+        expenses,
+        incomes,
+        categories: categoryMeta,
+        orders,
+        productSales,
+        deletedLog,
+        outletName: (id) => OUTLETS.find((o) => o.id === id)?.name ?? "Tanpa lantai",
+        warnings,
+      });
 
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(
-        r.cashDays.map((d) => ({
-          Tanggal: d.day,
-          "Masuk Tunai": d.inCash,
-          "Masuk Non-tunai": d.inNonCash,
-          "Keluar Tunai": d.outCash,
-          "Keluar Non-tunai": d.outNonCash,
-          Netto: d.net,
-          "Saldo Kumulatif": d.cumulative,
-        })),
-      ),
-      "Cashflow",
-    );
-
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(
-        sales.map((s) => ({
-          Tanggal: s.day,
-          Lantai: OUTLETS.find((o) => o.id === s.outlet_id)?.name ?? "Tanpa lantai",
-          Metode: METHOD_LABEL[s.payment_method ?? ""] ?? "—",
-          "Jumlah Order": s.orders_count,
-          "Total (Rp)": s.total,
-        })),
-      ),
-      "Penjualan",
-    );
-
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(
-        incomes.map((i) => ({
-          Tanggal: i.occurred_on,
-          Sumber: i.source,
-          Jenis: i.kind === "modal" ? "Modal" : "Pendapatan",
-          Keterangan: i.description ?? "",
-          Metode: METHOD_LABEL[i.payment_method ?? "cash"] ?? "",
-          "Nominal (Rp)": i.amount,
-        })),
-      ),
-      "Pemasukan Lain",
-    );
-
-    XLSX.utils.book_append_sheet(
-      wb,
-      XLSX.utils.json_to_sheet(
-        expenses.map((e) => ({
-          Tanggal: e.occurred_on,
-          Kategori: e.category,
-          Keterangan: e.description ?? "",
-          Metode: METHOD_LABEL[e.payment_method ?? "cash"] ?? "",
-          "Nominal (Rp)": e.amount,
-        })),
-      ),
-      "Pengeluaran",
-    );
-
-    XLSX.writeFile(wb, `Rekap_Keuangan_${startDate}_sd_${endDate}.xlsx`);
+      downloadAuditWorkbook(specs, `Audit_Keuangan_${startDate}_sd_${endDate}.xlsx`);
+      setError(warnings.length ? warnings.join(" ") : null);
+    } catch (err: any) {
+      setError(err?.message ?? "Gagal membuat file Excel.");
+    } finally {
+      setExporting(false);
+    }
   };
 
   const maxDaily = Math.max(1, ...report.daily.map((d) => Math.max(d.income, d.expense)));
@@ -665,8 +714,8 @@ export default function FinanceRecapPage() {
           </p>
         </div>
         <div className="grid grid-cols-2 sm:flex gap-2">
-          <Button color="success" onPress={exportExcel}>
-            Ekspor Excel
+          <Button color="success" isLoading={exporting} onPress={exportExcel}>
+            Ekspor Excel (Audit)
           </Button>
           <Button color="primary" variant="flat" onPress={openCreateIncome}>
             Catat Pemasukan
@@ -771,6 +820,7 @@ export default function FinanceRecapPage() {
           <Tab key="cashflow" title="Cashflow" />
           <Tab key="pemasukan" title="Pemasukan" />
           <Tab key="pengeluaran" title="Pengeluaran" />
+          <Tab key="hpp" title="HPP per Menu" />
           <Tab key="grafik" title="Grafik Harian" />
         </Tabs>
       </div>
@@ -841,14 +891,22 @@ export default function FinanceRecapPage() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <CategoryTable
+              expenses={expenses}
+              revenue={report.revenue}
               rows={report.cogsByCategory}
               title="HPP per Kategori"
+              toCogs={true}
               total={report.cogs}
+              onMove={moveCategory}
             />
             <CategoryTable
+              expenses={expenses}
+              revenue={report.revenue}
               rows={report.opexByCategory}
               title="Biaya Operasional per Kategori"
+              toCogs={false}
               total={report.opex}
+              onMove={moveCategory}
             />
           </div>
         </div>
@@ -964,6 +1022,11 @@ export default function FinanceRecapPage() {
           onDelete={removeExpense}
           onEdit={openEditExpense}
         />
+      )}
+
+      {/* ===== HPP PER MENU ===== */}
+      {tab === "hpp" && (
+        <ProductCostTab actualCogs={report.cogs} end={endDate} start={startDate} />
       )}
 
       {/* ===== GRAFIK ===== */}

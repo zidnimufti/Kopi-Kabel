@@ -1,25 +1,49 @@
 import { supabase } from './supabaseClient'; // Sesuaikan path jika perlu
 import { Product } from '../types'; // Sesuaikan path jika perlu
+import { compressImage, UPLOAD_CACHE_CONTROL } from './compressImage';
 
-// Fungsi baru untuk mengunggah gambar produk
+// Nama file unik & aman: tanpa spasi/karakter khusus. Wajib UNIK karena cache 1 tahun
+// (gambar yang diganti harus memakai nama baru agar pengunjung tidak melihat gambar lama).
+export const buildImagePath = (file: { type: string; name: string }, now: number = Date.now()) => {
+  const fromType: Record<string, string> = {
+    'image/webp': 'webp',
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/gif': 'gif',
+  };
+  const ext =
+    fromType[file.type] ||
+    (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') ||
+    'jpg';
+  const uid =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  return `public/${now}-${uid}.${ext}`;
+};
+
+// Mengunggah gambar produk. Gambar DIPERKECIL dulu (WebP, lebar maks. 800 px) dan diberi
+// cache 1 tahun. Bila pengecilan gagal / tidak lebih kecil, file asli yang diunggah.
 export const uploadProductImage = async (file: File) => {
-    // Buat nama file yang unik untuk menghindari konflik
-    const filePath = `public/${Date.now()}-${file.name}`;
+  const optimized = await compressImage(file);
+  const filePath = buildImagePath(optimized);
 
-    const { error: uploadError } = await supabase.storage
-        .from('product-images') // Nama bucket yang kita buat
-        .upload(filePath, file);
+  const { error: uploadError } = await supabase.storage
+    .from('product-images') // Nama bucket yang kita buat
+    .upload(filePath, optimized, {
+      cacheControl: UPLOAD_CACHE_CONTROL,
+      contentType: optimized.type || undefined,
+      upsert: false,
+    });
 
-    if (uploadError) {
-        throw uploadError;
-    }
+  if (uploadError) {
+    throw uploadError;
+  }
 
-    // Ambil URL publik dari file yang baru diunggah
-    const { data } = supabase.storage
-        .from('product-images')
-        .getPublicUrl(filePath);
+  // Ambil URL publik dari file yang baru diunggah
+  const { data } = supabase.storage.from('product-images').getPublicUrl(filePath);
 
-    return data.publicUrl;
+  return data.publicUrl;
 };
 
 

@@ -13,6 +13,7 @@ import type {
   CategoryMeta,
   Expense,
   OtherIncome,
+  ProductSalesRow,
   SalesDailyRow,
 } from "@/api/FinanceApi";
 
@@ -249,5 +250,131 @@ export function buildReport({
       const d = dayMap.get(day)!;
       return { day, income: d.income, expense: d.expense };
     }),
+  };
+}
+
+
+// =====================================================================
+// HPP per menu
+//
+//  - revenue    : jumlah subtotal item (sudah setelah diskon)
+//  - cogsTotal  : jumlah terjual x biaya per porsi, hanya untuk ukuran yang BIAYANYA SUDAH DIISI
+//  - margin     : dihitung hanya dari bagian yang biayanya sudah diisi
+//                 (menu yang belum diisi tidak dihitung agar margin tidak menyesatkan)
+// =====================================================================
+export interface ProductReportRow {
+  productId: number;
+  name: string;
+  qtyRegular: number;
+  qtyLarge: number;
+  qty: number;
+  revenue: number;
+  unitRegular: number | null;
+  unitLarge: number | null;
+  /** HPP total untuk bagian yang biayanya sudah diisi */
+  cogsTotal: number;
+  /** pendapatan untuk bagian yang biayanya sudah diisi */
+  revenueKnown: number;
+  /** true bila semua ukuran yang terjual sudah ada biayanya */
+  complete: boolean;
+  /** true bila tidak ada satu pun ukuran terjual yang punya biaya */
+  missingAll: boolean;
+  grossProfit: number;
+  /** persen; null bila belum ada biaya yang diisi */
+  margin: number | null;
+  /** asal biaya pada ukuran yang biayanya terisi: resep, manual, atau campur; null bila belum ada */
+  source: "resep" | "manual" | "campur" | null;
+  /** true bila ada ukuran dengan resep yang belum lengkap (ada bahan tanpa harga) */
+  recipeIncomplete: boolean;
+}
+
+export interface ProductReport {
+  rows: ProductReportRow[];
+  totalRevenue: number;
+  revenueKnown: number;
+  /** persen pendapatan yang menunya sudah punya biaya */
+  coverage: number;
+  cogsTheoretical: number;
+  grossTheoretical: number;
+  marginTheoretical: number | null;
+  missingCount: number;
+}
+
+export function buildProductReport(sales: ProductSalesRow[]): ProductReport {
+  const map = new Map<number, ProductReportRow>();
+
+  sales.forEach((r) => {
+    const row =
+      map.get(r.product_id) ??
+      ({
+        productId: r.product_id,
+        name: r.product_name,
+        qtyRegular: 0,
+        qtyLarge: 0,
+        qty: 0,
+        revenue: 0,
+        unitRegular: null,
+        unitLarge: null,
+        cogsTotal: 0,
+        revenueKnown: 0,
+        complete: true,
+        missingAll: true,
+        grossProfit: 0,
+        margin: null,
+        source: null,
+        recipeIncomplete: false,
+      } as ProductReportRow);
+
+    row.qty += r.qty;
+    row.revenue += r.revenue;
+
+    if (r.size === "large") {
+      row.qtyLarge += r.qty;
+      row.unitLarge = r.unit_cogs;
+    } else {
+      row.qtyRegular += r.qty;
+      row.unitRegular = r.unit_cogs;
+    }
+
+    if (r.unit_cogs === null) {
+      row.complete = false;
+      if (r.cost_source === "resep_tidak_lengkap") row.recipeIncomplete = true;
+    } else {
+      row.cogsTotal += r.unit_cogs * r.qty;
+      row.revenueKnown += r.revenue;
+      row.missingAll = false;
+      if (r.cost_source === "resep" || r.cost_source === "manual") {
+        row.source =
+          row.source === null || row.source === r.cost_source ? r.cost_source : "campur";
+      }
+    }
+
+    map.set(r.product_id, row);
+  });
+
+  const rows = Array.from(map.values()).map((row) => {
+    const grossProfit = row.revenueKnown - row.cogsTotal;
+    return {
+      ...row,
+      grossProfit,
+      margin: row.revenueKnown > 0 ? (grossProfit / row.revenueKnown) * 100 : null,
+    };
+  });
+  rows.sort((a, b) => b.revenue - a.revenue);
+
+  const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
+  const revenueKnown = rows.reduce((s, r) => s + r.revenueKnown, 0);
+  const cogsTheoretical = rows.reduce((s, r) => s + r.cogsTotal, 0);
+  const grossTheoretical = revenueKnown - cogsTheoretical;
+
+  return {
+    rows,
+    totalRevenue,
+    revenueKnown,
+    coverage: totalRevenue > 0 ? (revenueKnown / totalRevenue) * 100 : 0,
+    cogsTheoretical,
+    grossTheoretical,
+    marginTheoretical: revenueKnown > 0 ? (grossTheoretical / revenueKnown) * 100 : null,
+    missingCount: rows.filter((r) => !r.complete).length,
   };
 }

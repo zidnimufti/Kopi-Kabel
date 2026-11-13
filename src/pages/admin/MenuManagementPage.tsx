@@ -149,6 +149,8 @@ const MenuManagementPage = () => {
                   "https://placehold.co/100x100/e2e8f0/e2e8f0?text=No-Image"
                 }
                 alt={product.name}
+                loading="lazy"
+                decoding="async"
                 className="w-16 h-16 object-cover rounded-md shrink-0"
               />
               <div className="flex-1 min-w-0">
@@ -233,6 +235,8 @@ const MenuManagementPage = () => {
                         "https://placehold.co/100x100/e2e8f0/e2e8f0?text=No-Image"
                       }
                       alt={product.name}
+                      loading="lazy"
+                      decoding="async"
                       className="w-16 h-16 object-cover rounded-md"
                     />
                   </TableCell>

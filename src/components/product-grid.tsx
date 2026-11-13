@@ -160,6 +160,8 @@ export const ProductGrid: React.FC<ProductGridProps> = ({ products }) => {
                               "https://placehold.co/300x256/e2e8f0/e2e8f0?text=No-Image"
                             }
                             alt={product.name}
+                            loading="lazy"
+                            decoding="async"
                             className="w-full h-40 sm:h-64 object-cover"
                           />
                         </div>

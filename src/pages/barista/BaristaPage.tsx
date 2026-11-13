@@ -917,6 +917,8 @@ export default function BaristaPage() {
                       <img
                         src={product.image_url || "https://placehold.co/150x100/e2e8f0/e2e8f0?text=No-Image"}
                         alt={product.name}
+                        loading="lazy"
+                        decoding="async"
                         className="w-full h-24 object-cover rounded-md mb-2"
                       />
                       <p className="font-bold text-sm truncate">{product.name}</p>
