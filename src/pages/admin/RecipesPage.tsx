@@ -34,7 +34,7 @@ import {
   type MenuRow,
   type RecipeData,
   type RecipeSize,
-} from "@/api/Recipeapi";
+} from "@/api/RecipeApi";
 import {
   costPerUnitFromPack,
   effectivePrice,
