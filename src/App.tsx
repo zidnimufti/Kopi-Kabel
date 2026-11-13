@@ -21,6 +21,7 @@ import InventoryPage from './pages/admin/Inventory';
 import AttendanceGuard from './auth/components/AttendanceGuard';
 import VerifyAttendancePage from './pages/barista/VerifyAttendancePage';
 import FinanceRecapPage from './pages/admin/FinanceRecap';
+import RecipesPage from './pages/admin/RecipesPage';
 
 
 
@@ -74,6 +75,8 @@ export default function App() {
 
           {/* Stok utama */}
           <Route path="stock" element={<InventoryPage />} />
+          <Route path="recipes" element={<RecipesPage />} />
+
         </Route>
 
         {/* Alias absolut: /app/admin/stok -> /app/admin/raw-stock */}

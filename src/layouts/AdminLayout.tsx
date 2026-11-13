@@ -28,6 +28,7 @@ const NAVS: NavDef[] = [
   { to: "/app/admin/finance", label: "Keuangan" }, 
   { to: "/app/admin/stock", label: "Stok Bahan" },
   
+  
 ];
 
 function useActiveMatcher() {
